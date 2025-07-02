@@ -122,9 +122,19 @@ def load_user_data(db, user_id):
                 # Load expenses
                 expenses_data = user_data.get('expenses', [])
                 st.session_state.expenses = pd.DataFrame(expenses_data) if expenses_data else pd.DataFrame(columns=['date', 'category', 'amount', 'description'])
+                # Ensure 'imported' column exists
+                if 'imported' not in st.session_state.expenses.columns:
+                    st.session_state.expenses['imported'] = False
+                else:
+                    st.session_state.expenses['imported'] = st.session_state.expenses['imported'].fillna(False)
                 # Load income
                 income_data = user_data.get('income', [])
                 st.session_state.income = pd.DataFrame(income_data) if income_data else pd.DataFrame(columns=['date', 'source', 'amount', 'frequency'])
+                # Ensure 'imported' column exists
+                if 'imported' not in st.session_state.income.columns:
+                    st.session_state.income['imported'] = False
+                else:
+                    st.session_state.income['imported'] = st.session_state.income['imported'].fillna(False)
                 # Load budget
                 st.session_state.budget = user_data.get('budget', DEFAULT_BUDGET.copy())
                 # Load savings goals
@@ -146,12 +156,30 @@ def load_user_data(db, user_id):
             # MongoDB not available, use session state
             if 'expenses' not in st.session_state:
                 initialize_new_user()
+            # Ensure 'imported' column exists in session state
+            if 'imported' not in st.session_state.expenses.columns:
+                st.session_state.expenses['imported'] = False
+            else:
+                st.session_state.expenses['imported'] = st.session_state.expenses['imported'].fillna(False)
+            if 'imported' not in st.session_state.income.columns:
+                st.session_state.income['imported'] = False
+            else:
+                st.session_state.income['imported'] = st.session_state.income['imported'].fillna(False)
             print("Using session state storage (MongoDB not available)")
     except Exception as e:
         st.error(f"❌ Error loading user data from database. Using session storage.\nDetails: {e}")
         # Fallback to session state
         if 'expenses' not in st.session_state:
             initialize_new_user()
+        # Ensure 'imported' column exists in session state
+        if 'imported' not in st.session_state.expenses.columns:
+            st.session_state.expenses['imported'] = False
+        else:
+            st.session_state.expenses['imported'] = st.session_state.expenses['imported'].fillna(False)
+        if 'imported' not in st.session_state.income.columns:
+            st.session_state.income['imported'] = False
+        else:
+            st.session_state.income['imported'] = st.session_state.income['imported'].fillna(False)
         print("Falling back to session state storage")
 
 def save_user_data(db, user_id):
@@ -274,14 +302,26 @@ st.markdown("""
         .metric-card { font-size: 0.9rem; }
         .stTabs [role='tablist'] { flex-direction: column; }
     }
+    /* Hide vertical scrollbar for the main content and sidebar */
+    ::-webkit-scrollbar {
+        width: 0px;
+        background: transparent;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # Constants are now imported from config.py
 
 # Helper functions (modified to save to DB)
-def add_expense(date, category, amount, description=""):
-    # Create a unique hash for the transaction
+def add_expense(date, category, amount, description="", imported=False):
+    new_expense = pd.DataFrame({
+        'date': [date],
+        'category': [category],
+        'amount': [amount],
+        'description': [description],
+        'imported': [imported]
+    })
+    # Duplicate prevention logic (unchanged)
     tx_str = f"{date}|{category}|{amount}|{description}".lower()
     tx_hash = hashlib.sha256(tx_str.encode()).hexdigest()
     if 'expense_hashes' not in st.session_state:
@@ -290,20 +330,21 @@ def add_expense(date, category, amount, description=""):
         st.warning("Duplicate expense detected. This transaction was not added.")
         return
     st.session_state.expense_hashes.add(tx_hash)
-    new_expense = pd.DataFrame({
-        'date': [date],
-        'category': [category],
-        'amount': [amount],
-        'description': [description]
-    })
     st.session_state.expenses = pd.concat([st.session_state.expenses, new_expense], ignore_index=True)
     # Save to database (if available) - use existing connection
     if st.session_state.get('mongodb_available', False) and 'db_connection' in st.session_state:
         print("user_id before saving:", st.session_state.user_id)
         save_user_data(st.session_state.db_connection, st.session_state.user_id)
 
-def add_income(date, source, amount, frequency="One-time"):
-    # Create a unique hash for the income transaction
+def add_income(date, source, amount, frequency="One-time", imported=False):
+    new_income = pd.DataFrame({
+        'date': [date],
+        'source': [source],
+        'amount': [amount],
+        'frequency': [frequency],
+        'imported': [imported]
+    })
+    # Duplicate prevention logic (unchanged)
     tx_str = f"{date}|{source}|{amount}|{frequency}".lower()
     tx_hash = hashlib.sha256(tx_str.encode()).hexdigest()
     if 'income_hashes' not in st.session_state:
@@ -312,12 +353,6 @@ def add_income(date, source, amount, frequency="One-time"):
         st.warning("Duplicate income detected. This transaction was not added.")
         return
     st.session_state.income_hashes.add(tx_hash)
-    new_income = pd.DataFrame({
-        'date': [date],
-        'source': [source],
-        'amount': [amount],
-        'frequency': [frequency]
-    })
     st.session_state.income = pd.concat([st.session_state.income, new_income], ignore_index=True)
     # Save to database (if available) - use existing connection
     if st.session_state.get('mongodb_available', False) and 'db_connection' in st.session_state:
@@ -338,10 +373,12 @@ def generate_ai_insights():
         expenses_df = st.session_state.expenses.copy()
         expenses_df['date'] = pd.to_datetime(expenses_df['date'])
         
-        # Top spending category
-        top_category = expenses_df.groupby('category')['amount'].sum().idxmax()
-        top_amount = expenses_df.groupby('category')['amount'].sum().max()
-        insights.append(f"💡 Your highest spending category is {top_category} with ₹{top_amount:,.2f}")
+        # Exclude 'INCOME' from spending categories
+        spending_only = expenses_df[~expenses_df['category'].str.upper().eq('INCOME')]
+        if not spending_only.empty:
+            top_category = spending_only.groupby('category')['amount'].sum().idxmax()
+            top_amount = spending_only.groupby('category')['amount'].sum().max()
+            insights.append(f"💡 Your highest spending category is {top_category} with ₹{top_amount:,.2f}")
         
         # Weekly pattern analysis
         expenses_df['day_of_week'] = expenses_df['date'].dt.day_name()
@@ -433,9 +470,11 @@ def dashboard_page():
     col1, col2 = st.columns(2)
     
     with col1:
-        if not st.session_state.expenses.empty:
+        # Filter out 'INCOME' and any non-expense categories
+        filtered_expenses = st.session_state.expenses[~st.session_state.expenses['category'].str.upper().eq('INCOME')]
+        if not filtered_expenses.empty:
             st.subheader("💳 Spending by Category")
-            expenses_by_category = st.session_state.expenses.groupby('category')['amount'].sum().reset_index()
+            expenses_by_category = filtered_expenses.groupby('category')['amount'].sum().reset_index()
             fig = px.pie(expenses_by_category, values='amount', names='category', 
                         title="Current Month Spending Distribution")
             st.plotly_chart(fig, use_container_width=True)
@@ -486,6 +525,20 @@ def dashboard_page():
 # Add transaction page (modified to include delete buttons)
 def add_transaction_page():
     st.header("Add Transaction")
+
+    # --- Danger Zone: Delete all CSV-imported transactions ---
+    st.markdown("### Danger Zone")
+    if st.button("🗑️ Delete ALL CSV-Imported Transactions"):
+        # Only keep rows where imported is not True (i.e., keep manual entries)
+        if 'imported' in st.session_state.expenses.columns:
+            st.session_state.expenses = st.session_state.expenses[~st.session_state.expenses['imported']]
+        if 'imported' in st.session_state.income.columns:
+            st.session_state.income = st.session_state.income[~st.session_state.income['imported']]
+        # Save to DB if available
+        if st.session_state.get('mongodb_available', False) and 'db_connection' in st.session_state:
+            save_user_data(st.session_state.db_connection, st.session_state.user_id)
+        st.success("All CSV-imported transactions deleted! Manual entries are preserved.")
+        st.rerun()
 
     # --- CSV/XLSX Upload Section ---
     st.subheader("📁 Upload Transactions (CSV/XLSX)")
@@ -570,7 +623,12 @@ def add_transaction_page():
                         subcat_val = row[col_map['SUBCATEGORY']] if col_map['SUBCATEGORY'] else ''
                         source_val = row[col_map['SOURCE']] if col_map['SOURCE'] else ''
                         desc_val = row[col_map['DESCRIPTION']] if col_map['DESCRIPTION'] else ''
-                        add_expense(date_val, category_val, amount_val, desc_val)
+                        if amount_val < 0:
+                            # Treat as income (convert to positive)
+                            add_income(date_val, source_val, abs(amount_val), "One-time", imported=True)
+                        else:
+                            # Treat as expense
+                            add_expense(date_val, category_val, amount_val, desc_val, imported=True)
                         imported += 1
                     except Exception as e:
                         print(f"Row import error: {e}")
@@ -765,22 +823,40 @@ def analytics_page():
     st.subheader("🔎 Filters")
     expenses_df = st.session_state.expenses.copy()
     expenses_df['date'] = pd.to_datetime(expenses_df['date'])
-    categories = sorted(expenses_df['category'].unique())
-    min_amt, max_amt = float(expenses_df['amount'].min()), float(expenses_df['amount'].max())
     
+    # Add filter for manual/imported/all
+    filter_type = st.selectbox(
+        "Show Transactions:",
+        ["All", "Manual only", "Imported only"],
+        index=0
+    )
+    if 'imported' in expenses_df.columns:
+        if filter_type == "Manual only":
+            expenses_df = expenses_df[(expenses_df['imported'] == False) | (expenses_df['imported'].isna())]
+        elif filter_type == "Imported only":
+            expenses_df = expenses_df[expenses_df['imported'] == True]
+    elif filter_type != "All":
+        st.info("No imported/manual distinction found in your data.")
+    
+    # Default year to most recent with data
+    years = sorted(expenses_df['date'].dt.year.unique())
+    default_year_idx = len(years)-1 if years else 0
     col1, col2, col3 = st.columns(3)
     with col1:
-        # Time period filter
-        years = sorted(expenses_df['date'].dt.year.unique())
-        year = st.selectbox("Year", years, index=len(years)-1)
+        year = st.selectbox("Year", years, index=default_year_idx)
         months = expenses_df[expenses_df['date'].dt.year == year]['date'].dt.month.unique()
         month = st.selectbox("Month", ["All"] + [datetime(1900, m, 1).strftime('%B') for m in sorted(months)])
     with col2:
-        # Category filter
+        categories = sorted(expenses_df['category'].unique())
         selected_cats = st.multiselect("Category", categories, default=categories)
     with col3:
-        # Amount filter
-        amt_range = st.slider("Amount Range", min_amt, max_amt, (min_amt, max_amt))
+        min_amt, max_amt = float(expenses_df['amount'].min()), float(expenses_df['amount'].max())
+        if min_amt == max_amt:
+            amt_range = (min_amt, max_amt)
+            st.slider("Amount Range", min_amt, max_amt, (min_amt, max_amt), disabled=True)
+            st.info(f"Only one unique amount: {min_amt}. No range to filter.")
+        else:
+            amt_range = st.slider("Amount Range", min_amt, max_amt, (min_amt, max_amt))
     # Apply filters
     filtered = expenses_df[expenses_df['date'].dt.year == year]
     if month != "All":
@@ -788,6 +864,15 @@ def analytics_page():
         filtered = filtered[filtered['date'].dt.month == month_num]
     filtered = filtered[filtered['category'].isin(selected_cats)]
     filtered = filtered[(filtered['amount'] >= amt_range[0]) & (filtered['amount'] <= amt_range[1])]
+    
+    # --- Show warning if no data for selected year/filter ---
+    if filtered.empty:
+        if filter_type == "Manual only":
+            st.warning(f"No manually added transactions found for {year} with the selected filters.")
+        elif filter_type == "Imported only":
+            st.warning(f"No imported transactions found for {year} with the selected filters.")
+        else:
+            st.warning(f"No transactions found for {year} with the selected filters.")
     
     # --- Spending Trends ---
     st.subheader("💸 Spending Trends")
@@ -886,9 +971,17 @@ def profile_page():
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.image("https://via.placeholder.com/150", caption="Profile Picture")
-        if st.button("Upload New Picture"):
-            st.info("Photo upload feature would be implemented here")
+        # Generate avatar with first letter of user's name
+        user_name = st.session_state.user_profile.get('name', 'U')
+        first_letter = user_name[0].upper() if user_name else 'U'
+        avatar_svg = f'''
+        <svg width="120" height="120" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="60" cy="60" r="58" fill="#1f77b4" />
+          <text x="50%" y="58%" text-anchor="middle" fill="#fff" font-size="60" font-family="Arial, sans-serif" dy=".3em">{first_letter}</text>
+        </svg>
+        '''
+        st.markdown(f'<div style="text-align:center; max-width:130px; height:130px; margin:auto; overflow:hidden; display:flex; align-items:center; justify-content:center;">{avatar_svg}</div>', unsafe_allow_html=True)
+        st.caption("Profile Picture")
     
     with col2:
         st.subheader("Profile Information")
