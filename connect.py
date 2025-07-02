@@ -29,38 +29,85 @@ def init_mongodb():
         return db
     except Exception as e:
         st.session_state.mongodb_available = False
-        # Don't print the error to avoid cluttering logs
+        st.warning("⚠️ Could not connect to MongoDB. Data will be stored only for this session.")
         return None
 
 # User authentication functions
 def hash_email(email):
     return hashlib.sha256(email.encode()).hexdigest()
 
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
 def authenticate_user():
     if 'user_email' not in st.session_state:
         st.session_state.user_email = None
-    
-    if st.session_state.user_email is None:
-        st.sidebar.subheader("🔐 Login")
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+
+    if not st.session_state.authenticated:
+        st.sidebar.subheader("🔐 Login or Register")
         email = st.sidebar.text_input("Enter your email:", key="login_email")
-        if st.sidebar.button("Login"):
-            if email:
-                st.session_state.user_email = email.lower().strip()
-                st.session_state.user_id = hash_email(st.session_state.user_email)
-                st.rerun()
+        password = st.sidebar.text_input("Enter your password:", type="password", key="login_password")
+        db = st.session_state.get('db_connection', None)
+        if st.sidebar.button("Login/Register"):
+            if email and password:
+                user_id = hash_email(email.lower().strip())
+                user_email = email.lower().strip()
+                user_doc = None
+                if db is not None and st.session_state.get('mongodb_available', False):
+                    user_doc = db.users.find_one({"user_id": user_id})
+                if user_doc:
+                    # User exists, check password
+                    stored_hash = user_doc.get('password_hash', None)
+                    if stored_hash and stored_hash == hash_password(password):
+                        st.session_state.user_email = user_email
+                        st.session_state.user_id = user_id
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        st.sidebar.error("Incorrect password. Please try again.")
+                else:
+                    # New user registration
+                    if db is not None and st.session_state.get('mongodb_available', False):
+                        db.users.insert_one({
+                            "user_id": user_id,
+                            "email": user_email,
+                            "password_hash": hash_password(password),
+                            "expenses": [],
+                            "income": [],
+                            "budget": DEFAULT_BUDGET.copy(),
+                            "savings_goals": DEFAULT_SAVINGS_GOALS.copy(),
+                            "user_profile": {
+                                'name': user_email.split('@')[0],
+                                'email': user_email,
+                                'member_since': datetime.now().strftime('%Y-%m-%d'),
+                                'currency': '₹',
+                                'language': 'English'
+                            },
+                            "last_updated": datetime.now()
+                        })
+                    st.session_state.user_email = user_email
+                    st.session_state.user_id = user_id
+                    st.session_state.authenticated = True
+                    st.sidebar.success("Account created and logged in!")
+                    st.rerun()
             else:
-                st.sidebar.error("Please enter a valid email")
+                st.sidebar.error("Please enter both email and password.")
         return False
-    
+
     # Logout button
     if st.sidebar.button("Logout"):
         st.session_state.user_email = None
         st.session_state.user_id = None
+        st.session_state.authenticated = False
         for key in list(st.session_state.keys()):
-            if key not in ['user_email', 'user_id']:
+            if key not in ['user_email', 'user_id', 'authenticated']:
                 del st.session_state[key]
         st.rerun()
-    
+
     st.sidebar.success(f"Logged in as: {st.session_state.user_email}")
     return True
 
@@ -71,29 +118,17 @@ def load_user_data(db, user_id):
         if db is not None and st.session_state.get('mongodb_available', False):
             # Try to load from MongoDB
             user_data = db.users.find_one({"user_id": user_id})
-            
             if user_data:
                 # Load expenses
                 expenses_data = user_data.get('expenses', [])
                 st.session_state.expenses = pd.DataFrame(expenses_data) if expenses_data else pd.DataFrame(columns=['date', 'category', 'amount', 'description'])
-                
                 # Load income
                 income_data = user_data.get('income', [])
                 st.session_state.income = pd.DataFrame(income_data) if income_data else pd.DataFrame(columns=['date', 'source', 'amount', 'frequency'])
-                
                 # Load budget
-                st.session_state.budget = user_data.get('budget', {
-                    'Food': 5000, 'Transportation': 3000, 'Entertainment': 2000,
-                    'Shopping': 4000, 'Utilities': 2500, 'Medical': 1500,
-                    'Education': 2000, 'Miscellaneous': 1000
-                })
-                
+                st.session_state.budget = user_data.get('budget', DEFAULT_BUDGET.copy())
                 # Load savings goals
-                st.session_state.savings_goals = user_data.get('savings_goals', [
-                    {'name': 'Emergency Fund', 'target': 50000, 'current': 15000, 'deadline': '2024-12-31'},
-                    {'name': 'Vacation', 'target': 25000, 'current': 8000, 'deadline': '2024-08-15'}
-                ])
-                
+                st.session_state.savings_goals = user_data.get('savings_goals', DEFAULT_SAVINGS_GOALS.copy())
                 # Load user profile
                 st.session_state.user_profile = user_data.get('user_profile', {
                     'name': st.session_state.user_email.split('@')[0],
@@ -102,7 +137,6 @@ def load_user_data(db, user_id):
                     'currency': '₹',
                     'language': 'English'
                 })
-                
                 print("Loading user data for user_id:", user_id)
                 print("Loaded user data:", user_data)
             else:
@@ -113,9 +147,8 @@ def load_user_data(db, user_id):
             if 'expenses' not in st.session_state:
                 initialize_new_user()
             print("Using session state storage (MongoDB not available)")
-            
     except Exception as e:
-        print(f"Error loading user data: {e}")
+        st.error(f"❌ Error loading user data from database. Using session storage.\nDetails: {e}")
         # Fallback to session state
         if 'expenses' not in st.session_state:
             initialize_new_user()
@@ -127,7 +160,6 @@ def save_user_data(db, user_id):
         # Convert DataFrames to list of dictionaries
         expenses_data = st.session_state.expenses.to_dict('records') if not st.session_state.expenses.empty else []
         income_data = st.session_state.income.to_dict('records') if not st.session_state.income.empty else []
-
         # Convert all date fields to string (ISO format)
         for expense in expenses_data:
             if isinstance(expense['date'], (datetime, )):
@@ -143,10 +175,12 @@ def save_user_data(db, user_id):
                 income['date'] = income['date'].strftime('%Y-%m-%d')
             elif isinstance(income['date'], (date, )):
                 income['date'] = income['date'].isoformat()
-
         if db is not None and st.session_state.get('mongodb_available', False):
             # Save to MongoDB
-            user_data = {
+            # Do not overwrite password_hash
+            user_data = db.users.find_one({"user_id": user_id}) or {}
+            password_hash = user_data.get('password_hash', None)
+            new_data = {
                 "user_id": user_id,
                 "email": st.session_state.user_email,
                 "expenses": expenses_data,
@@ -156,20 +190,19 @@ def save_user_data(db, user_id):
                 "user_profile": st.session_state.user_profile,
                 "last_updated": datetime.now()
             }
-
-            # Upsert user data
-            db.users.replace_one({"user_id": user_id}, user_data, upsert=True)
-            print("Saving user data to MongoDB:", user_data)
+            if password_hash:
+                new_data['password_hash'] = password_hash
+            db.users.replace_one({"user_id": user_id}, new_data, upsert=True)
+            print("Saving user data to MongoDB:", new_data)
             print("user_id for saving:", st.session_state.user_id)
             print("Expenses to save:", expenses_data)
             print("Income to save:", income_data)
         else:
             # MongoDB not available, data is already in session state
             print("Data saved to session state (MongoDB not available)")
-        
         return True
     except Exception as e:
-        print("Error saving user data:", e)
+        st.error(f"❌ Error saving user data to database. Data is only saved for this session.\nDetails: {e}")
         # Data is already in session state, so we don't need to show an error
         return True
 
@@ -195,21 +228,24 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Modern theme and responsive CSS
 st.markdown("""
 <style>
+    html, body, [class*='css']  { font-family: 'Inter', 'Segoe UI', Arial, sans-serif; }
     .main-header {
         font-size: 2.5rem;
         font-weight: bold;
         color: #1f77b4;
         text-align: center;
         margin-bottom: 2rem;
+        letter-spacing: -1px;
     }
     .metric-card {
         background-color: #f0f2f6;
         padding: 1rem;
         border-radius: 10px;
         border-left: 5px solid #1f77b4;
+        margin-bottom: 1rem;
     }
     .success-card {
         background-color: #d4edda;
@@ -223,6 +259,21 @@ st.markdown("""
         background-color: #f8d7da;
         border-left: 5px solid #dc3545;
     }
+    /* Responsive tables/charts */
+    .element-container, .stDataFrame, .stTable, .stPlotlyChart {
+        overflow-x: auto !important;
+        max-width: 100vw;
+    }
+    @media (max-width: 900px) {
+        .main-header { font-size: 1.5rem; }
+        .metric-card { font-size: 1rem; }
+        .stTabs [role='tablist'] { flex-wrap: wrap; }
+    }
+    @media (max-width: 600px) {
+        .main-header { font-size: 1.1rem; }
+        .metric-card { font-size: 0.9rem; }
+        .stTabs [role='tablist'] { flex-direction: column; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -230,6 +281,15 @@ st.markdown("""
 
 # Helper functions (modified to save to DB)
 def add_expense(date, category, amount, description=""):
+    # Create a unique hash for the transaction
+    tx_str = f"{date}|{category}|{amount}|{description}".lower()
+    tx_hash = hashlib.sha256(tx_str.encode()).hexdigest()
+    if 'expense_hashes' not in st.session_state:
+        st.session_state.expense_hashes = set()
+    if tx_hash in st.session_state.expense_hashes:
+        st.warning("Duplicate expense detected. This transaction was not added.")
+        return
+    st.session_state.expense_hashes.add(tx_hash)
     new_expense = pd.DataFrame({
         'date': [date],
         'category': [category],
@@ -237,13 +297,21 @@ def add_expense(date, category, amount, description=""):
         'description': [description]
     })
     st.session_state.expenses = pd.concat([st.session_state.expenses, new_expense], ignore_index=True)
-    
     # Save to database (if available) - use existing connection
     if st.session_state.get('mongodb_available', False) and 'db_connection' in st.session_state:
         print("user_id before saving:", st.session_state.user_id)
         save_user_data(st.session_state.db_connection, st.session_state.user_id)
 
 def add_income(date, source, amount, frequency="One-time"):
+    # Create a unique hash for the income transaction
+    tx_str = f"{date}|{source}|{amount}|{frequency}".lower()
+    tx_hash = hashlib.sha256(tx_str.encode()).hexdigest()
+    if 'income_hashes' not in st.session_state:
+        st.session_state.income_hashes = set()
+    if tx_hash in st.session_state.income_hashes:
+        st.warning("Duplicate income detected. This transaction was not added.")
+        return
+    st.session_state.income_hashes.add(tx_hash)
     new_income = pd.DataFrame({
         'date': [date],
         'source': [source],
@@ -251,7 +319,6 @@ def add_income(date, source, amount, frequency="One-time"):
         'frequency': [frequency]
     })
     st.session_state.income = pd.concat([st.session_state.income, new_income], ignore_index=True)
-    
     # Save to database (if available) - use existing connection
     if st.session_state.get('mongodb_available', False) and 'db_connection' in st.session_state:
         print("user_id before saving:", st.session_state.user_id)
@@ -325,9 +392,11 @@ def main():
     # Sidebar navigation
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox("Choose a section", 
-                               ["Dashboard", "Add Transaction", "Budget", "Analytics", "Profile"])
+                               ["Home", "Dashboard", "Add Transaction", "Budget", "Analytics", "Profile"])
     
-    if page == "Dashboard":
+    if page == "Home":
+        home_page()
+    elif page == "Dashboard":
         dashboard_page()
     elif page == "Add Transaction":
         add_transaction_page()
@@ -416,8 +485,99 @@ def dashboard_page():
 
 # Add transaction page (modified to include delete buttons)
 def add_transaction_page():
-    st.header("💳 Add Transaction")
-    
+    st.header("Add Transaction")
+
+    # --- CSV/XLSX Upload Section ---
+    st.subheader("📁 Upload Transactions (CSV/XLSX)")
+    st.markdown("Upload your transactions file. Supports common Indian bank exports (SBI, ICICI, HDFC, Axis, etc.).")
+
+    # Downloadable sample template
+    sample_df = pd.DataFrame({
+        'DATE': ['2024-01-01'],
+        'AMOUNT': [-310.15],
+        'SUBCATEGORY': ['Groceries'],
+        'CATEGORY': ['Food'],
+        'SOURCE': ['Checkings'],
+        'DESCRIPTION': ['Groceries at supermarket XYZ']
+    })
+    sample_csv = sample_df.to_csv(index=False)
+    st.download_button("Download Sample CSV", sample_csv, file_name="fintrack_sample.csv", mime="text/csv")
+
+    uploaded_file = st.file_uploader("Upload CSV or XLSX file", type=["csv", "xlsx"])
+    if uploaded_file is not None:
+        # Read file
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        st.write("Preview:", df.head())
+
+        # Common header mappings for Indian banks
+        bank_header_map = [
+            # SBI
+            {'date': ['Txn Date', 'Date'], 'amount': ['Withdrawal Amt.', 'Deposit Amt.', 'Amount'], 'desc': ['Description', 'Narration', 'Particulars']},
+            # ICICI
+            {'date': ['Transaction Date'], 'amount': ['Amount'], 'desc': ['Remarks', 'Description']},
+            # HDFC
+            {'date': ['Date'], 'amount': ['Withdrawal Amount', 'Deposit Amount', 'Amount'], 'desc': ['Description', 'Narration']},
+            # Axis
+            {'date': ['Transaction Date'], 'amount': ['Amount'], 'desc': ['Description', 'Narration']},
+        ]
+
+        # Default mapping
+        default_map = {
+            'DATE': None,
+            'AMOUNT': None,
+            'CATEGORY': None,
+            'SUBCATEGORY': None,
+            'SOURCE': None,
+            'DESCRIPTION': None
+        }
+        # Try to auto-map columns
+        col_map = default_map.copy()
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'date' in col_lower:
+                col_map['DATE'] = col
+            elif 'amount' in col_lower:
+                col_map['AMOUNT'] = col
+            elif 'category' in col_lower:
+                col_map['CATEGORY'] = col
+            elif 'subcat' in col_lower:
+                col_map['SUBCATEGORY'] = col
+            elif 'source' in col_lower or 'account' in col_lower:
+                col_map['SOURCE'] = col
+            elif 'desc' in col_lower or 'narration' in col_lower or 'remark' in col_lower or 'particular' in col_lower:
+                col_map['DESCRIPTION'] = col
+        # UI for manual mapping
+        st.markdown("#### Map Columns")
+        for key in col_map:
+            col_map[key] = st.selectbox(f"{key} column", [None] + list(df.columns), index=(1 + list(df.columns).index(col_map[key])) if col_map[key] in df.columns else 0, key=f"map_{key}")
+        # Parse and add transactions
+        if st.button("Import Transactions"):
+            # Validate required columns
+            required = ['DATE', 'AMOUNT', 'CATEGORY']
+            missing = [k for k in required if not col_map[k]]
+            if missing:
+                st.error(f"Missing required columns: {', '.join(missing)}")
+            else:
+                imported = 0
+                for _, row in df.iterrows():
+                    try:
+                        date_val = pd.to_datetime(row[col_map['DATE']]).date()
+                        amount_val = float(row[col_map['AMOUNT']])
+                        category_val = row[col_map['CATEGORY']] if col_map['CATEGORY'] else 'Miscellaneous'
+                        subcat_val = row[col_map['SUBCATEGORY']] if col_map['SUBCATEGORY'] else ''
+                        source_val = row[col_map['SOURCE']] if col_map['SOURCE'] else ''
+                        desc_val = row[col_map['DESCRIPTION']] if col_map['DESCRIPTION'] else ''
+                        add_expense(date_val, category_val, amount_val, desc_val)
+                        imported += 1
+                    except Exception as e:
+                        print(f"Row import error: {e}")
+                st.success(f"Imported {imported} transactions!")
+                st.rerun()
+    # --- End Upload Section ---
+
     tab1, tab2 = st.tabs(["Add Expense", "Add Income"])
     
     with tab1:
@@ -593,7 +753,7 @@ def budget_page():
             st.success("Budget updated successfully!")
             st.rerun()
 
-# Analytics page (remains the same)
+# Analytics page (modified to save to DB)
 def analytics_page():
     st.header("📈 Financial Analytics")
     
@@ -601,84 +761,122 @@ def analytics_page():
         st.info("No data available for analysis. Please add some transactions first.")
         return
     
-    # Time period selector
-    time_period = st.selectbox("Select Time Period", ["Last 30 Days", "Last 3 Months", "Last 6 Months", "All Time"])
+    # --- FILTERS ---
+    st.subheader("🔎 Filters")
+    expenses_df = st.session_state.expenses.copy()
+    expenses_df['date'] = pd.to_datetime(expenses_df['date'])
+    categories = sorted(expenses_df['category'].unique())
+    min_amt, max_amt = float(expenses_df['amount'].min()), float(expenses_df['amount'].max())
     
-    # Spending trends
-    if not st.session_state.expenses.empty:
-        expenses_df = st.session_state.expenses.copy()
-        expenses_df['date'] = pd.to_datetime(expenses_df['date'])
-        
-        st.subheader("💸 Spending Trends")
-        
-        # Daily spending trend
-        daily_spending = expenses_df.groupby('date')['amount'].sum().reset_index()
-        fig = px.line(daily_spending, x='date', y='amount', title="Daily Spending Trend")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        # Time period filter
+        years = sorted(expenses_df['date'].dt.year.unique())
+        year = st.selectbox("Year", years, index=len(years)-1)
+        months = expenses_df[expenses_df['date'].dt.year == year]['date'].dt.month.unique()
+        month = st.selectbox("Month", ["All"] + [datetime(1900, m, 1).strftime('%B') for m in sorted(months)])
+    with col2:
+        # Category filter
+        selected_cats = st.multiselect("Category", categories, default=categories)
+    with col3:
+        # Amount filter
+        amt_range = st.slider("Amount Range", min_amt, max_amt, (min_amt, max_amt))
+    # Apply filters
+    filtered = expenses_df[expenses_df['date'].dt.year == year]
+    if month != "All":
+        month_num = datetime.strptime(month, '%B').month
+        filtered = filtered[filtered['date'].dt.month == month_num]
+    filtered = filtered[filtered['category'].isin(selected_cats)]
+    filtered = filtered[(filtered['amount'] >= amt_range[0]) & (filtered['amount'] <= amt_range[1])]
+    
+    # --- Spending Trends ---
+    st.subheader("💸 Spending Trends")
+    if not filtered.empty:
+        # Daily spending trend with trendline
+        daily_spending = filtered.groupby('date')['amount'].sum().reset_index()
+        fig = px.line(daily_spending, x='date', y='amount', title="Daily Spending Trend", markers=True)
+        # Add trendline
+        if len(daily_spending) > 1:
+            import statsmodels.api as sm
+            x = (daily_spending['date'] - daily_spending['date'].min()).dt.days.values.reshape(-1, 1)
+            y = daily_spending['amount'].values
+            model = sm.OLS(y, sm.add_constant(x)).fit()
+            trend = model.predict(sm.add_constant(x))
+            fig.add_traces(go.Scatter(x=daily_spending['date'], y=trend, mode='lines', name='Trendline'))
         st.plotly_chart(fig, use_container_width=True)
         
-        # Category analysis
-        col1, col2 = st.columns(2)
+        # Category analysis (horizontal bar)
+        st.subheader("📊 Top Spending Categories")
+        category_spending = filtered.groupby('category')['amount'].sum().sort_values(ascending=True)
+        fig = px.bar(
+            x=category_spending.values,
+            y=category_spending.index,
+            orientation='h',
+            title="Spending by Category",
+            labels={'x': 'Amount (₹)', 'y': 'Category'},
+            hover_data={'Amount (₹)': category_spending.values, 'Category': category_spending.index}
+        )
+        st.plotly_chart(fig, use_container_width=True)
         
-        with col1:
-            st.subheader("📊 Top Spending Categories")
-            category_spending = expenses_df.groupby('category')['amount'].sum().sort_values(ascending=False)
-            fig = px.bar(x=category_spending.index, y=category_spending.values, 
-                        title="Spending by Category",
-                        labels={'x': 'Category', 'y': 'Amount (₹)'})
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.subheader("📅 Weekly Spending Pattern")
-            expenses_df['day_of_week'] = expenses_df['date'].dt.day_name()
-            weekly_pattern = expenses_df.groupby('day_of_week')['amount'].sum()
-            # Reorder days
-            day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-            weekly_pattern = weekly_pattern.reindex(day_order, fill_value=0)
-            
-            fig = px.bar(x=weekly_pattern.index, y=weekly_pattern.values,
-                        title="Spending by Day of Week")
-            st.plotly_chart(fig, use_container_width=True)
+        # Weekly pattern
+        st.subheader("📅 Weekly Spending Pattern")
+        filtered['day_of_week'] = filtered['date'].dt.day_name()
+        weekly_pattern = filtered.groupby('day_of_week')['amount'].sum()
+        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        weekly_pattern = weekly_pattern.reindex(day_order, fill_value=0)
+        fig = px.bar(x=weekly_pattern.index, y=weekly_pattern.values, title="Spending by Day of Week")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No expenses match the selected filters.")
     
-    # Income vs Expenses comparison
-    if not st.session_state.income.empty and not st.session_state.expenses.empty:
+    # --- Income vs Expenses ---
+    if not st.session_state.income.empty and not filtered.empty:
         st.subheader("💰 Income vs Expenses")
-        
         income_df = st.session_state.income.copy()
         income_df['date'] = pd.to_datetime(income_df['date'])
-        
+        # Filter income by year/month
+        income_filtered = income_df[income_df['date'].dt.year == year]
+        if month != "All":
+            income_filtered = income_filtered[income_filtered['date'].dt.month == month_num]
         # Monthly comparison
-        expenses_monthly = expenses_df.groupby(expenses_df['date'].dt.to_period('M'))['amount'].sum()
-        income_monthly = income_df.groupby(income_df['date'].dt.to_period('M'))['amount'].sum()
-        
+        expenses_monthly = filtered.groupby(filtered['date'].dt.to_period('M'))['amount'].sum()
+        income_monthly = income_filtered.groupby(income_filtered['date'].dt.to_period('M'))['amount'].sum()
         comparison_df = pd.DataFrame({
             'Month': expenses_monthly.index.astype(str),
             'Expenses': expenses_monthly.values,
             'Income': income_monthly.reindex(expenses_monthly.index, fill_value=0).values
         })
-        
         fig = go.Figure()
         fig.add_trace(go.Bar(name='Income', x=comparison_df['Month'], y=comparison_df['Income']))
         fig.add_trace(go.Bar(name='Expenses', x=comparison_df['Month'], y=comparison_df['Expenses']))
         fig.update_layout(title="Monthly Income vs Expenses", barmode='group')
         st.plotly_chart(fig, use_container_width=True)
     
-    # Financial health metrics
+    # --- Goal vs Actual (Progress Bars) ---
+    st.subheader("🎯 Goal vs Actual Savings Progress")
+    if 'savings_goals' in st.session_state:
+        for goal in st.session_state.savings_goals:
+            progress = min(goal['current'] / goal['target'], 1.0)
+            st.write(f"**{goal['name']}**")
+            st.progress(progress)
+            st.write(f"₹{goal['current']:,} / ₹{goal['target']:,} ({progress*100:.1f}%)")
+            st.write(f"Deadline: {goal['deadline']}")
+            st.write("---")
+    
+    # --- Financial health metrics ---
     st.subheader("🏥 Financial Health Metrics")
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        avg_daily_spend = expenses_df['amount'].sum() / max(len(expenses_df['date'].unique()), 1) if not expenses_df.empty else 0
+        avg_daily_spend = filtered['amount'].sum() / max(len(filtered['date'].unique()), 1) if not filtered.empty else 0
         st.metric("Average Daily Spend", f"₹{avg_daily_spend:.2f}")
-    
     with col2:
         monthly_income = get_monthly_data(st.session_state.income)
         monthly_expenses = get_monthly_data(st.session_state.expenses)
         savings_rate = ((monthly_income - monthly_expenses) / monthly_income * 100) if monthly_income > 0 else 0
         st.metric("Current Savings Rate", f"{savings_rate:.1f}%")
-    
     with col3:
-        if not expenses_df.empty:
-            largest_expense = expenses_df['amount'].max()
+        if not filtered.empty:
+            largest_expense = filtered['amount'].max()
             st.metric("Largest Single Expense", f"₹{largest_expense:.2f}")
 
 # Profile page (modified to save to DB)
@@ -726,6 +924,32 @@ def profile_page():
     with col4:
         net_worth = total_income - total_expenses
         st.metric("Net Position", f"₹{net_worth:,.2f}")
+
+def home_page():
+    st.markdown("""
+    <div class="main-header">Take Control of Your Finances</div>
+    <p>Welcome to a Streamlit-based personal finance dashboard. This intuitive dashboard is designed to give you a visual representation of your finances over time, empowering you to make informed decisions and achieve your financial goals.</p>
+    <h3>What can you see here?</h3>
+    <ul>
+        <li><b>Track your income and expenses</b> 📊: See exactly where your money comes from and goes. Easy-to-read visualizations break down your income streams and spending habits, helping you identify areas for potential savings or growth. Gain a comprehensive understanding of your financial patterns to make informed decisions about budgeting and resource allocation.</li>
+        <li><b>Monitor your cash flow</b> 🐝: Stay on top of your incoming and outgoing funds. This dashboard provides clear insight into your current financial liquidity, allowing you to plan for upcoming expenses and avoid potential shortfalls. Anticipate cash crunches and optimize your spending timing to maintain a healthy financial balance.</li>
+        <li><b>View your financial progress</b> 📈: Charts and graphs track your progress towards your financial goals over time. Whether you're saving for a dream vacation or planning for retirement, this dashboard keeps you motivated and on track. Visualize your long-term financial journey and adjust your strategies based on real-time performance data.</li>
+    </ul>
+    """, unsafe_allow_html=True)
+    st.markdown("---")
+    st.header("FAQ")
+    with st.expander("How do I add my transactions?"):
+        st.write("You can add transactions manually or upload a CSV/XLSX file exported from your bank. Use the 'Add Transaction' page and follow the instructions for mapping columns if uploading a file.")
+    with st.expander("Can I edit or delete a transaction after adding it?"):
+        st.write("Yes! You can delete recent transactions directly from the 'Add Transaction' page. Editing is currently not supported, but you can delete and re-add a corrected entry.")
+    with st.expander("How do I set or change my budget?"):
+        st.write("Go to the 'Budget' section to view, set, or update your monthly budget for each category. Changes are saved automatically if you are connected to MongoDB.")
+    with st.expander("What happens if I lose connection to MongoDB?"):
+        st.write("If the app can't connect to MongoDB, your data will only be saved for the current browser session. You'll see a warning at the top of the app if this happens.")
+    with st.expander("How does the app prevent duplicate transactions?"):
+        st.write("When you add or upload transactions, the app checks for duplicates using the date, category/source, amount, and description/frequency. Duplicate entries are not added.")
+    with st.expander("Is my data private and secure?"):
+        st.write("Your data is stored securely in your own MongoDB database. Only you can access your data using your login credentials. Passwords are hashed for security.")
 
 if __name__ == "__main__":
     main()
